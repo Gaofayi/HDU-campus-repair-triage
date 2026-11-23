@@ -1,0 +1,27 @@
+# Python临时文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# 运行时动态数据（不提交测试产生的工单，部署后自动生成）
+data/
+*.csv
+*.json
+!knowledge_base/结构化知识库.json
+
+# Streamlit临时配置
+.streamlit/secrets.toml
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp

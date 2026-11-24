@@ -49,15 +49,36 @@ with tab1:
                 if order["work_order_id"] == query_order_id.strip():
                     found = order
                     break
+        # 兜底：查询当前待确认的session工单
+        if not found and st.session_state.triage_result and st.session_state.triage_result.get("pre_order_id") == query_order_id.strip():
+            current_res = st.session_state.triage_result
+            found = {
+                "status": "待调度员确认" + ("（加急复核中）" if current_res.get("post_upgrade_applied") else ""),
+                "appointment_date": current_res.get("appointment_date"),
+                "appointment_slot": current_res.get("appointment_slot"),
+                "fault_type": current_res.get("fault_category_name"),
+                "final_urgency": current_res.get("urgency"),
+                "worker_name": "待调度员分配",
+                "worker_phone": "-",
+                "chat_record": "",
+                "post_upgrade": current_res.get("post_upgrade_applied", False),
+                "upgrade_reason": current_res.get("upgrade_reason", ""),
+                "upgrade_reply": ""
+            }
         if found:
             st.success(f"工单状态：{found['status']}")
             st.write(f"预约上门时间：{found['appointment_date']} {found['appointment_slot']}")
             st.write(f"故障类型：{found['fault_type']}，最终紧急度：{found['final_urgency']}")
             st.write(f"维修人员：{found['worker_name']}，联系电话：{found['worker_phone']}")
+            if found.get("post_upgrade"):
+                st.error("🚨 该工单为人工加急/复核工单")
+                st.write(f"升级原因：{found.get('upgrade_reason', '')}")
+                if found.get("upgrade_reply"):
+                    st.write(f"调度员复核回复：{found['upgrade_reply']}")
             if found.get("chat_record"):
                 st.write(f"沟通备注：{found['chat_record']}")
         else:
-            st.warning("未查询到工单，请确认工单号是否正确，或工单仍在待确认队列")
+            st.warning("未查询到工单，请确认工单号是否正确")
 
     st.divider()
     st.subheader("提交新报修")
@@ -139,6 +160,9 @@ with tab1:
         st.write(f"**预约时间**：{res['appointment_date']} {res['appointment_slot']}")
         st.write(f"**响应说明**：{STUDENT_RESPONSE_TEXT[res['urgency']]}")
         st.write("**当前状态**：已提交，等待调度员人工确认派单，确认后可在本页顶部用工单号查询维修人员信息")
+        if res.get("post_upgrade_applied"):
+            st.error("🚨 你的人工加急/复核申请已提交，调度员将优先处理该工单，处理结果可通过工单号实时查询")
+            st.write(f"升级原因：{res.get('upgrade_reason', '')}")
 
         if res.get("security_tip"):
             st.warning(f"⚠️ 安全提示：{res['security_tip']}")
@@ -160,6 +184,7 @@ with tab1:
                 res["manual_urgent_request"] = True
                 res["upgrade_reason"] = upgrade_reason + " " + upgrade_note
                 st.session_state.triage_result = res
+                st.success("加急/复核申请提交成功，调度员将优先处理")
                 st.rerun()
 
 # ===================== 调度员页 =====================
@@ -167,16 +192,21 @@ with tab2:
     st.subheader("调度员人工确认（强制环节）")
     if st.session_state.triage_result and st.session_state.triage_result["status"] != "need_more_info":
         res = st.session_state.triage_result
+        if res.get("post_upgrade_applied"):
+            st.error("🚨 【加急优先处理】学生提交了人工复核/加急申请，请优先处理该工单")
+            st.write(f"升级原因：{res.get('upgrade_reason', '')}")
         st.write(f"预约时间：{res['appointment_date']} {res['appointment_slot']}")
         if res.get("appointment_note"):
             st.write(f"学生备注：{res['appointment_note']}")
-        if res.get("post_upgrade_applied"):
-            st.error("人工申请升级：" + res.get("upgrade_reason", ""))
 
         st.divider()
         default_idx = ["P0","P1","P2"].index(res.get("urgency", "P1"))
         adjust_urgency = st.radio("最终紧急度", options=["P0", "P1", "P2"],
                                   index=default_idx, horizontal=True)
+        # 升级工单必须填写复核回复
+        upgrade_reply = ""
+        if res.get("post_upgrade_applied"):
+            upgrade_reply = st.text_area("升级复核回复（学生可查询到）", placeholder="例如：已核实情况，调整为P0加急，安排当日上门")
         manual_chat_note = st.text_area("人工沟通记录", value=st.session_state.manual_chat_note)
         st.session_state.manual_chat_note = manual_chat_note
 
@@ -191,27 +221,32 @@ with tab2:
         confirm_note = st.text_area("派单备注", value="按预约时间上门")
 
         if st.button("确认派单并归档", type="primary"):
-            worker_info = next(w for w in workers if w["name"] == selected_worker_name) if not worker_error else {"name": selected_worker_name, "phone": "人工录入"}
-            order_data = {
-                "work_order_id": res["pre_order_id"],
-                "create_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "building": res.get("building"),
-                "room": res.get("room"),
-                "fault_type": res.get("fault_category_name"),
-                "ai_urgency": res.get("urgency"),
-                "final_urgency": adjust_urgency,
-                "post_upgrade": res.get("post_upgrade_applied", False),
-                "appointment_date": res.get("appointment_date"),
-                "appointment_slot": res.get("appointment_slot"),
-                "appointment_note": res.get("appointment_note", ""),
-                "worker_name": worker_info["name"],
-                "worker_phone": worker_info.get("phone", ""),
-                "chat_record": manual_chat_note,
-                "confirm_note": confirm_note,
-                "upgrade_reason": res.get("upgrade_reason", ""),
-                "raw_report": report_text,
-                "status": "已派单，等待上门"
-            }
+            if res.get("post_upgrade_applied") and not upgrade_reply.strip():
+                st.warning("请填写升级复核回复，学生可查询到处理结果")
+            else:
+                worker_info = next(w for w in workers if w["name"] == selected_worker_name) if not worker_error else {"name": selected_worker_name, "phone": "人工录入"}
+                order_status = "加急工单已优先派单，等待上门" if res.get("post_upgrade_applied") else "已派单，等待上门"
+                order_data = {
+                    "work_order_id": res["pre_order_id"],
+                    "create_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "building": res.get("building"),
+                    "room": res.get("room"),
+                    "fault_type": res.get("fault_category_name"),
+                    "ai_urgency": res.get("urgency"),
+                    "final_urgency": adjust_urgency,
+                    "post_upgrade": res.get("post_upgrade_applied", False),
+                    "appointment_date": res.get("appointment_date"),
+                    "appointment_slot": res.get("appointment_slot"),
+                    "appointment_note": res.get("appointment_note", ""),
+                    "worker_name": worker_info["name"],
+                    "worker_phone": worker_info.get("phone", ""),
+                    "chat_record": manual_chat_note,
+                    "confirm_note": confirm_note,
+                    "upgrade_reason": res.get("upgrade_reason", ""),
+                    "upgrade_reply": upgrade_reply,
+                    "raw_report": report_text,
+                    "status": order_status
+                }
             st.session_state.confirmed_order = order_data
             ledger_path = os.path.join(DATA_DIR, "工单台账.json")
             ledger = []

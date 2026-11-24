@@ -1,6 +1,8 @@
 # 模拟排班与备件库存数据
 from datetime import datetime
 import random
+import os
+from config import WORK_ORDER_PREFIX, DATA_DIR
 
 # 维修人员排班表（模拟6名维修人员，覆盖不同技能）
 WORKERS = [
@@ -138,8 +140,28 @@ def check_inventory(required_parts):
     return sufficient, missing
 
 def generate_work_order_id():
-    """生成工单号：HDU+年月日+3位流水号"""
+    """生成工单号：HDU+年月日+3位流水号，自动读取台账递增，兼容首次运行"""
     date_str = datetime.now().strftime("%Y%m%d")
-    # 简单流水号，实际使用从台账读取
-    serial = random.randint(1, 999)
+    max_serial = 0
+    ledger_path = os.path.join(DATA_DIR, "工单台账.json")
+    try:
+        if os.path.exists(ledger_path):
+            import json
+            with open(ledger_path, "r", encoding="utf-8") as f:
+                ledger = json.load(f)
+            # 筛选当天工单，提取最大流水号
+            for order in ledger:
+                order_id = order.get("work_order_id", "")
+                prefix = f"{WORK_ORDER_PREFIX}{date_str}"
+                if order_id.startswith(prefix):
+                    try:
+                        serial_num = int(order_id[len(prefix):])
+                        if serial_num > max_serial:
+                            max_serial = serial_num
+                    except ValueError:
+                        continue
+    except Exception:
+        # 云端文件异常时兜底从1开始，不阻断提交
+        max_serial = 0
+    serial = max_serial + 1
     return f"{WORK_ORDER_PREFIX}{date_str}{serial:03d}"

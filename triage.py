@@ -44,6 +44,19 @@ def detect_fault_category(text):
                 "hit_keywords": hit_keywords
             })
     if not category_scores:
+        # 兜底强特征匹配，避免口语化描述漏判
+        fallback_rules = [
+            (["灯", "电", "插座", "开关", "跳闸"], "水电类"),
+            (["水", "漏", "堵", "马桶", "滴水"], "给排水类"),
+            (["门", "窗", "锁", "家具", "柜子"], "门窗家具类"),
+            (["网", "wifi", "WiFi", "路由器"], "网络类"),
+            (["空调", "风扇"], "空调类"),
+            (["实验", "仪器", "试剂"], "实验设备类")
+        ]
+        for features, cat_name in fallback_rules:
+            if any(feat in text for feat in features):
+                fallback_cat = next(c for c in FAULT_CATEGORIES if c["name"] == cat_name)
+                return fallback_cat, 0.75, ["口语特征兜底匹配"]
         return None, 0, []
     # 特殊冲突处理：仅当核心故障是水电/触电本身才优先水电；漏水导致的插座泡水，主分类仍为给排水
     cat_names = [x["category"]["name"] for x in category_scores]
@@ -196,9 +209,11 @@ def triage(text, uploaded_image=None):
                 "故障描述不够清晰，请补充故障现象、是否有安全隐患"
             ]
         else:
-            # 分类正常但位置缺失：保留待补充提示，不阻断分诊结果
+            # 分类正常但位置缺失：需要补充信息，不阻断分类但进入追问
             result["followup_questions"] = followups
             result["need_more_info"] = len(followups) > 0
+            if len(followups) > 0:
+                result["status"] = "need_more_info"
 
     return result
 

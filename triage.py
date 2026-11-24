@@ -3,9 +3,17 @@ import re
 from config import FAULT_CATEGORIES, P0_KEYWORDS, CONFIDENCE_THRESHOLD, P0_SECURITY_TIPS
 
 def extract_building_room(text):
-    """从文本提取楼栋和房间号，支持数字号楼、X教教学楼格式"""
+    """从文本提取楼栋和房间号，支持数字号楼、X教、公共建筑名称格式"""
     building = None
     room = None
+    # 匹配公共建筑名称
+    public_buildings = ["图书馆", "行政楼", "第一食堂", "第二食堂", "第三食堂", "教工餐厅",
+                       "体育馆", "东操场", "西北田径场", "校医院", "后勤大厅", "学生活动中心",
+                       "信仁楼", "信礼楼", "信智楼", "信诚楼", "信远楼", "信义楼", "信博楼"]
+    for pub in public_buildings:
+        if pub in text:
+            building = pub
+            break
     # 先匹配 X教（教学楼格式，例如5教）
     teaching_match = re.search(r"(\d{1,2})\s*教", text)
     if teaching_match:
@@ -33,8 +41,8 @@ def detect_fault_category(text):
             if kw in text:
                 hit_count += 1
                 hit_keywords.append(kw)
-                # 词越长权重越高，3字以上专属词权重翻倍
-                total_weight += len(kw) * 0.08
+                # 词越长权重越高，专属词权重计算
+                total_weight += len(kw) * 0.1
         if hit_count > 0:
             # 置信度计算：基础分+权重分
             score = min(0.5 + total_weight, 0.98)
@@ -51,7 +59,9 @@ def detect_fault_category(text):
             (["门", "窗", "锁", "家具", "柜子"], "门窗家具类"),
             (["网", "wifi", "WiFi", "路由器"], "网络类"),
             (["空调", "风扇"], "空调类"),
-            (["实验", "仪器", "试剂"], "实验设备类")
+            (["实验", "仪器", "试剂"], "实验设备类"),
+            (["烟感", "消防", "报警器", "门禁", "监控"], "消防安防类"),
+            (["电梯", "洗衣机", "饮水机", "开水器", "公共设施"], "公共设施类")
         ]
         for features, cat_name in fallback_rules:
             if any(feat in text for feat in features):
@@ -66,6 +76,11 @@ def detect_fault_category(text):
             category_scores = sorted(category_scores, key=lambda x:
                 0 if x["category"]["name"] == "水电类" else 1)
             return category_scores[0]["category"], category_scores[0]["score"], category_scores[0]["hit_keywords"]
+    # 特殊冲突：公共区域照明/设备优先公共设施类
+    if any(word in text for word in ["楼道", "公共", "楼层", "电梯间"]) and "公共设施类" in cat_names:
+        public_match = [x for x in category_scores if x["category"]["name"] == "公共设施类"]
+        if public_match:
+            return public_match[0]["category"], max(public_match[0]["score"], 0.8), public_match[0]["hit_keywords"]
     # 特殊冲突：命中实验专属长词（通风橱、实验仪器），优先实验设备类
     if any(kw in text for kw in ["通风橱", "实验仪器", "化学品", "实验台"]):
         exp_match = [x for x in category_scores if x["category"]["name"] == "实验设备类"]
@@ -91,6 +106,10 @@ def detect_p0(text, category_name):
         tip = P0_SECURITY_TIPS["水电"]
     elif category_name and "门窗" in category_name:
         tip = P0_SECURITY_TIPS["门窗"]
+    elif category_name and "消防安防" in category_name:
+        tip = P0_SECURITY_TIPS["消防安防"]
+    elif category_name and "公共设施" in category_name:
+        tip = P0_SECURITY_TIPS["公共设施"]
     else:
         tip = P0_SECURITY_TIPS["通用"]
     return True, hit_p0_keywords, tip
@@ -100,9 +119,9 @@ def detect_urgency(text, is_p0):
     if is_p0:
         return "P0"
     # P1先判断核心功能是否失效：如果同时命中P1/P2，优先P1
-    p1_signals = ["坏了", "不亮", "没电", "无法使用", "不能用", "堵塞", "损坏", "打不开",
-                  "关不上", "不制冷", "不转", "断裂", "失效", "没反应", "无网", "断网",
-                  "空调漏水", "漏水", "无法开机", "反水"]
+    p1_signals = ["坏了", "不亮", "没电", "无法使用", "不能用", "堵塞", "堵了", "损坏", "打不开",
+                  "关不上", "不制冷", "不转", "断裂", "失效", "没反应", "无网", "断网", "断了",
+                  "空调漏水", "漏水", "无法开机", "反水", "连不上", "掉了", "不出水", "刷不开", "报错"]
     is_p1 = any(sig in text for sig in p1_signals)
     if is_p1:
         return "P1"
@@ -185,17 +204,23 @@ def triage(text, uploaded_image=None):
     # 5. 判断紧急度
     result["urgency"] = detect_urgency(text, is_p0)
 
-    # 6. 收集待追问信息：仅核心字段真的缺失才提示，信息完整不做冗余提示
+    # 6. 收集待追问信息：公共区域/公共设备不强制房间号，仅私人宿舍报修需要房号
     followups = []
+    is_public_scene = (
+        result["fault_category_name"] in ["公共设施类", "消防安防类"]
+        or isinstance(building, str)
+        or any(word in text for word in ["公共", "楼道", "电梯", "楼层", "区域"])
+    )
     if building is None:
         followups.append("请补充具体楼栋编号（例如3号楼/5教）")
-    if room is None:
+    if room is None and not is_public_scene:
         followups.append("请补充具体房间号（例如412室）")
     if category is None:
         followups.append("请补充具体故障现象，比如漏水、灯不亮、门锁损坏等")
 
-    # 核心字段完整且置信度达标：直接判定信息完整，清空所有待完善提示
-    info_complete = (building is not None) and (room is not None) and (category is not None)
+    # 核心字段完整且置信度达标：直接判定信息完整
+    location_complete = building is not None and (room is not None or is_public_scene)
+    info_complete = location_complete and (category is not None)
     if info_complete and result["confidence"] >= CONFIDENCE_THRESHOLD:
         result["followup_questions"] = []
         result["need_more_info"] = False

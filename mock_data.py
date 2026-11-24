@@ -71,6 +71,28 @@ WORKERS = [
         "max_orders": 3,
         "location": "29号楼",
         "work_area": "宿舍区"
+    },
+    {
+        "worker_id": "W007",
+        "name": "郑师傅",
+        "skills": ["消防维保", "安防运维", "电工维修"],
+        "phone": "138****1007",
+        "available": True,
+        "current_orders": 0,
+        "max_orders": 2,
+        "location": "后勤大厅",
+        "work_area": "全校区"
+    },
+    {
+        "worker_id": "W008",
+        "name": "王师傅",
+        "skills": ["电梯维保", "公共设施维修", "家电维修"],
+        "phone": "138****1008",
+        "available": True,
+        "current_orders": 1,
+        "max_orders": 2,
+        "location": "13号楼",
+        "work_area": "宿舍区"
     }
 ]
 
@@ -97,10 +119,16 @@ INVENTORY = {
     "电容": 6,
     "遥控器": 3,
     "保险丝": 8,
+    "烟雾报警器": 4,
+    "应急灯": 6,
+    "门禁配件": 3,
+    "电梯配件": 2,
+    "饮水机滤芯": 5,
     # 模拟备件不足场景
     "备用阀芯": 0,
     "PPR水管": 1,
-    "漏电保护器": 0
+    "漏电保护器": 0,
+    "消防专用电池": 0
 }
 
 def query_available_workers(required_skill, is_p0=False):

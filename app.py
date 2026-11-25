@@ -1,11 +1,12 @@
 import streamlit as st
-import json
-import csv
-import os
 from datetime import datetime, timedelta
 from triage import triage, merge_manual_selection
-from mock_data import query_available_workers, check_inventory, generate_work_order_id
-from config import (DATA_DIR, WEEKDAY_SLOTS, WEEKEND_SLOTS, ANYTIME_SLOT,
+from mock_data import query_available_workers, check_inventory
+from db import (generate_work_order_id, insert_order, update_dispatch,
+                cancel_order, submit_evaluation, query_order_by_id,
+                list_orders_by_status, list_pending_orders, reset_demo_data,
+                DISPATCHER_PASSWORD)
+from config import (WEEKDAY_SLOTS, WEEKEND_SLOTS, ANYTIME_SLOT,
                     MANUAL_URGENCY_REASONS, FAULT_CATEGORIES,
                     STUDENT_RESPONSE_TEXT, SELF_HELP_SOLUTIONS)
 
@@ -15,270 +16,254 @@ st.set_page_config(
     layout="centered"
 )
 
-# 初始化session状态
-if "triage_result" not in st.session_state:
-    st.session_state.triage_result = None
-if "worker_candidates" not in st.session_state:
-    st.session_state.worker_candidates = None
-if "inventory_result" not in st.session_state:
-    st.session_state.inventory_result = None
-if "confirmed_order" not in st.session_state:
-    st.session_state.confirmed_order = None
-if "manual_chat_note" not in st.session_state:
-    st.session_state.manual_chat_note = ""
-if "student_order_id" not in st.session_state:
-    st.session_state.student_order_id = ""
+# 初始化session
+if "my_orders" not in st.session_state:
+    st.session_state.my_orders = []
+if "dispatch_logged_in" not in st.session_state:
+    st.session_state.dispatch_logged_in = False
+if "current_triage" not in st.session_state:
+    st.session_state.current_triage = None
+if "current_workers" not in st.session_state:
+    st.session_state.current_workers = None
 
 st.title("杭电校园报修智能分诊派单系统")
-st.caption("杭州电子科技大学 · AIGC智能体原型 · 人工确认后派单")
+st.caption("杭州电子科技大学 · AIGC应用创新大赛作品 · 人工强制确认兜底")
+st.info("首次加载休眠唤醒约需10-30秒，演示数据已内置，可直接操作", icon="ℹ️")
 
-tab1, tab2, tab3 = st.tabs(["学生报修与进度查询", "调度员确认派单", "工单台账"])
+tab_student, tab_dispatch, tab_ledger = st.tabs(["学生报修", "调度员工作台", "工单台账"])
 
-# ===================== 学生报修+查询页 =====================
-with tab1:
-    # 顶部工单查询入口
-    st.subheader("工单进度查询")
-    query_order_id = st.text_input("输入工单号查询最新状态", placeholder="例如HDU20261123001")
-    if st.button("查询工单"):
-        ledger_path = os.path.join(DATA_DIR, "工单台账.json")
-        found = None
-        if os.path.exists(ledger_path):
-            with open(ledger_path, "r", encoding="utf-8") as f:
-                ledger = json.load(f)
-            for order in ledger:
-                if order["work_order_id"] == query_order_id.strip():
-                    found = order
-                    break
-        # 兜底：查询当前待确认的session工单
-        if not found and st.session_state.triage_result and st.session_state.triage_result.get("pre_order_id") == query_order_id.strip():
-            current_res = st.session_state.triage_result
-            found = {
-                "status": "待调度员确认" + ("（加急复核中）" if current_res.get("post_upgrade_applied") else ""),
-                "appointment_date": current_res.get("appointment_date"),
-                "appointment_slot": current_res.get("appointment_slot"),
-                "fault_type": current_res.get("fault_category_name"),
-                "final_urgency": current_res.get("urgency"),
-                "worker_name": "待调度员分配",
-                "worker_phone": "-",
-                "chat_record": "",
-                "post_upgrade": current_res.get("post_upgrade_applied", False),
-                "upgrade_reason": current_res.get("upgrade_reason", ""),
-                "upgrade_reply": ""
-            }
-        if found:
-            st.success(f"工单状态：{found['status']}")
-            st.write(f"预约上门时间：{found['appointment_date']} {found['appointment_slot']}")
-            st.write(f"故障类型：{found['fault_type']}，最终紧急度：{found['final_urgency']}")
-            st.write(f"维修人员：{found['worker_name']}，联系电话：{found['worker_phone']}")
-            if found.get("post_upgrade"):
-                st.error("🚨 该工单为人工加急/复核工单")
-                st.write(f"升级原因：{found.get('upgrade_reason', '')}")
-                if found.get("upgrade_reply"):
-                    st.write(f"调度员复核回复：{found['upgrade_reply']}")
-            if found.get("chat_record"):
-                st.write(f"沟通备注：{found['chat_record']}")
+# ===================== 学生侧：报修为主，查询/我的工单次级 =====================
+with tab_student:
+    # 我的报修（不用记工单号，本地保存）
+    with st.expander("我的报修记录与进度查询", expanded=False):
+        # 工单号查询入口
+        query_id = st.text_input("输入工单号查询", placeholder="HDU开头的完整工单号")
+        if st.button("查询"):
+            order = query_order_by_id(query_id.strip())
+            if order:
+                st.success(f"状态：{order['status']}")
+                st.write(f"预约：{order['appointment_date']} {order['appointment_slot']}")
+                st.write(f"维修人员：{order['worker_name'] or '待分配'}")
+                if order["post_upgrade"]:
+                    st.write(f"加急回复：{order['upgrade_reply']}")
+            else:
+                st.warning("未查询到工单")
+        st.divider()
+        if st.session_state.my_orders:
+            for my_id in st.session_state.my_orders:
+                order = query_order_by_id(my_id)
+                if order:
+                    st.write(f"**{my_id}** · {order['status']}")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if order["status"] not in ["已取消", "已完成，已评价"]:
+                            if st.button("取消工单", key=f"cancel_{my_id}"):
+                                cancel_order(my_id)
+                                st.rerun()
+                    with col2:
+                        if order["status"] == "已派单，等待上门" or order["status"] == "加急工单已优先派单，等待上门":
+                            with st.expander("提交满意度评价"):
+                                score = st.slider("评分（1-5分）", 1, 5, 5, key=f"score_{my_id}")
+                                eval_text = st.text_area("评价内容", key=f"eval_{my_id}")
+                                if st.button("提交评价", key=f"submit_eval_{my_id}"):
+                                    submit_evaluation(my_id, score, eval_text)
+                                    st.rerun()
         else:
-            st.warning("未查询到工单，请确认工单号是否正确")
+            st.write("暂无提交记录，提交报修后自动保存到这里")
 
     st.divider()
     st.subheader("提交新报修")
-    report_text = st.text_area("文字描述故障（口语化即可）", height=100,
-                               placeholder="例如：3号楼412水龙头一直漏水，地面有积水")
-    uploaded_img = st.file_uploader("上传故障照片（可选）", type=["jpg", "jpeg", "png"])
-    if uploaded_img is not None:
-        st.image(uploaded_img, caption="已上传故障照片", width=300)
+    # 两列布局，减少长表单
+    col_left, col_right = st.columns(2)
+    with col_left:
+        report_text = st.text_area("故障描述（口语化即可）", height=120,
+                                   placeholder="例如：3号楼412水龙头滴水，关不紧")
+        uploaded_img = st.file_uploader("故障照片（可选）", type=["jpg", "jpeg", "png"])
+        if uploaded_img:
+            st.image(uploaded_img, width=200)
+            st.caption("演示版图片识别为模拟结果，仅作参考")
+    with col_right:
+        today = datetime.now().date()
+        app_date = st.date_input("预约日期", min_value=today,
+                                 max_value=today + timedelta(days=7), value=today)
+        is_weekend = app_date.weekday() >= 5
+        base_slots = WEEKEND_SLOTS if is_weekend else WEEKDAY_SLOTS
+        valid_slots = []
+        now_h = datetime.now().hour + datetime.now().minute/60
+        for s in base_slots:
+            if app_date == today and s["start_hour"] <= now_h:
+                continue
+            valid_slots.append(s)
+        slot_options = [s["label"] for s in valid_slots] + [ANYTIME_SLOT["label"]]
+        app_slot = st.selectbox("预约时段", options=slot_options)
+        st.caption("工作日/周末时段不同，当日已过期时段自动过滤")
+        app_note = st.text_input("时间备注（可选）")
+        with st.expander("手动选择故障信息（可选）"):
+            manual_cat = st.selectbox("故障大类",
+                ["自动判断"] + [c["name"] for c in FAULT_CATEGORIES])
+            manual_urg = st.selectbox("紧急度", ["自动判断", "P0", "P1", "P2"])
 
-    st.divider()
-    st.write("选择预约上门时间")
-    today = datetime.now().date()
-    max_date = today + timedelta(days=7)
-    appointment_date = st.date_input("预约日期", min_value=today, max_value=max_date, value=today)
-    is_weekend = appointment_date.weekday() >= 5
-    base_slots = WEEKEND_SLOTS if is_weekend else WEEKDAY_SLOTS
-    available_slots = []
-    now_hour = datetime.now().hour + datetime.now().minute / 60
-    for slot in base_slots:
-        if appointment_date == today:
-            if slot["start_hour"] > now_hour:
-                available_slots.append(slot)
+    if st.button("提交报修", type="primary", use_container_width=True):
+        # 就近校验提示
+        if not report_text.strip() and not uploaded_img:
+            st.error("请输入文字描述或上传故障照片", icon="⚠️")
+        elif not report_text.strip():
+            st.error("请补充文字描述，仅照片无法分诊")
         else:
-            available_slots.append(slot)
-    all_slot_options = [s["label"] for s in available_slots] + [ANYTIME_SLOT["label"]]
-    appointment_slot_label = st.selectbox("预约时段", options=all_slot_options) if all_slot_options else ""
-    appointment_note = st.text_input("特殊时间备注（可选）")
-
-    with st.expander("手动点选故障信息（可选，可修正AI判断）"):
-        manual_category_options = ["自动判断（以文字识别为准）"] + [cat["name"] for cat in FAULT_CATEGORIES]
-        manual_category = st.selectbox("故障大类", options=manual_category_options)
-        manual_urgency_options = ["AI自动判断", "P0", "P1", "P2"]
-        manual_urgency = st.selectbox("紧急程度", options=manual_urgency_options)
-
-    if st.button("提交报修", type="primary"):
-        if not report_text and uploaded_img is None:
-            st.warning("请输入文字或上传照片")
-        elif not appointment_slot_label:
-            st.warning("请选择有效预约时段")
-        else:
-            with st.spinner("智能体正在处理..."):
+            with st.spinner("智能体正在分诊..."):
                 result = triage(report_text, uploaded_img)
-                result = merge_manual_selection(result, manual_category, manual_urgency, False)
-                result["appointment_date"] = appointment_date.strftime("%Y-%m-%d")
-                result["appointment_slot"] = appointment_slot_label
-                result["appointment_note"] = appointment_note
-                result["post_upgrade_applied"] = False
-                result["upgrade_reason"] = ""
-                # 立刻给学生生成预工单号
-                pre_order_id = generate_work_order_id()
-                result["pre_order_id"] = pre_order_id
-                st.session_state.triage_result = result
-                st.session_state.student_order_id = pre_order_id
-                st.session_state.confirmed_order = None
-
+                result = merge_manual_selection(result,
+                    "" if manual_cat == "自动判断" else manual_cat,
+                    "" if manual_urg == "自动判断" else manual_urg, False)
                 if result["status"] == "need_more_info":
-                    st.warning("信息待补充，请完善后重新提交")
                     for q in result["followup_questions"]:
-                        st.write(f"- {q}")
+                        st.warning(q)
                 else:
-                    # 内部调度数据
-                    sufficient, missing = check_inventory(result["required_parts"])
-                    st.session_state.inventory_result = (sufficient, missing)
-                    required_skill = result["required_skills"][0] if result["required_skills"] else None
-                    workers, worker_error = query_available_workers(required_skill,
-                                                                   is_p0=(result["urgency"]=="P0"))
-                    st.session_state.worker_candidates = (workers, worker_error)
+                    order_id = generate_work_order_id()
+                    result["appointment_date"] = app_date.strftime("%Y-%m-%d")
+                    result["appointment_slot"] = app_slot
+                    result["appointment_note"] = app_note
+                    # 匹配维修人员
+                    skill = result["required_skills"][0] if result["required_skills"] else None
+                    workers, w_err = query_available_workers(skill, result["urgency"] == "P0")
+                    st.session_state.current_workers = (workers, w_err)
+                    # 先以待确认入库
+                    order_data = {
+                        "work_order_id": order_id,
+                        "create_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "building": result["building"],
+                        "room": result["room"],
+                        "fault_type": result["fault_category_name"],
+                        "ai_urgency": result["urgency"],
+                        "final_urgency": result["urgency"],
+                        "post_upgrade": False,
+                        "appointment_date": result["appointment_date"],
+                        "appointment_slot": result["appointment_slot"],
+                        "appointment_note": app_note,
+                        "worker_name": "",
+                        "worker_phone": "",
+                        "chat_record": "",
+                        "confirm_note": "",
+                        "upgrade_reason": "",
+                        "upgrade_reply": "",
+                        "raw_report": report_text,
+                        "status": "待确认"
+                    }
+                    insert_order(order_data)
+                    st.session_state.my_orders.append(order_id)
+                    st.session_state.current_triage = result
+                    st.rerun()
 
-    # 学生侧完整回执（提交成功后立刻展示，不是只有等待）
-    if st.session_state.triage_result and st.session_state.triage_result["status"] != "need_more_info":
-        res = st.session_state.triage_result
+    # 卡片式回执
+    if st.session_state.current_triage and st.session_state.current_triage["status"] == "success":
+        res = st.session_state.current_triage
+        latest_id = st.session_state.my_orders[-1]
         st.divider()
-        st.success("✅ 报修提交成功，以下是你的报修回执与临时处理建议")
-        # 学生可见核心信息，不展示内部置信度
-        st.write(f"**预工单号**：{res['pre_order_id']}")
-        loc_text = f"{res['building']}号楼" if isinstance(res['building'], int) else res['building']
-        st.write(f"**报修位置**：{loc_text} {res['room']}室")
-        st.write(f"**故障类型**：{res['fault_category_name']}")
-        st.write(f"**预约时间**：{res['appointment_date']} {res['appointment_slot']}")
-        st.write(f"**响应说明**：{STUDENT_RESPONSE_TEXT[res['urgency']]}")
-        st.write("**当前状态**：已提交，等待调度员人工确认派单，确认后可在本页顶部用工单号查询维修人员信息")
-        if res.get("post_upgrade_applied"):
-            st.error("🚨 你的人工加急/复核申请已提交，调度员将优先处理该工单，处理结果可通过工单号实时查询")
-            st.write(f"升级原因：{res.get('upgrade_reason', '')}")
-
-        if res.get("security_tip"):
-            st.warning(f"⚠️ 安全提示：{res['security_tip']}")
-
-        # 自助解决办法（学生要的即时处理方案）
-        st.divider()
-        st.write("### 临时自助排查与处理建议")
-        solutions = SELF_HELP_SOLUTIONS[res["fault_category_name"]]
-        for sol in solutions:
-            st.write(f"- {sol}")
-
+        st.success("✅ 报修提交成功")
+        st.write(f"**工单号：{latest_id}**")
+        loc = f"{res['building']}号楼" if isinstance(res['building'], int) else res['building']
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("故障类型", res["fault_category_name"])
+        with c2:
+            st.metric("紧急度", res["urgency"])
+        with c3:
+            st.metric("预约时间", res["appointment_slot"])
+        st.write(STUDENT_RESPONSE_TEXT[res["urgency"]])
+        if res["security_tip"]:
+            st.warning(res["security_tip"])
+        with st.expander("临时自助排查方案"):
+            for sol in SELF_HELP_SOLUTIONS[res["fault_category_name"]]:
+                st.write(f"- {sol}")
         # 后置升级入口
-        st.divider()
-        with st.expander("对结果有异议？申请人工加急/复核"):
-            upgrade_reason = st.selectbox("升级原因", options=MANUAL_URGENCY_REASONS)
-            upgrade_note = st.text_area("补充说明", height=60)
-            if st.button("提交升级申请"):
-                res["post_upgrade_applied"] = True
-                res["manual_urgent_request"] = True
-                res["upgrade_reason"] = upgrade_reason + " " + upgrade_note
-                st.session_state.triage_result = res
-                st.success("加急/复核申请提交成功，调度员将优先处理")
+        with st.expander("对结果有异议？申请人工复核"):
+            upg_reason = st.selectbox("升级原因", MANUAL_URGENCY_REASONS)
+            upg_note = st.text_area("补充说明")
+            if st.button("提交复核申请"):
+                order = query_order_by_id(latest_id)
+                order["post_upgrade"] = 1
+                order["upgrade_reason"] = upg_reason + " " + upg_note
+                order["status"] = "待确认（加急复核中）"
+                # 更新数据库
+                import db
+                conn = db.get_conn()
+                conn.execute('''UPDATE work_orders SET post_upgrade=1, upgrade_reason=?, status=?
+                                WHERE work_order_id=?''',
+                             (order["upgrade_reason"], order["status"], latest_id))
+                conn.commit()
+                conn.close()
+                st.success("复核申请已提交，调度员优先处理")
                 st.rerun()
 
-# ===================== 调度员页 =====================
-with tab2:
-    st.subheader("调度员人工确认（强制环节）")
-    if st.session_state.triage_result and st.session_state.triage_result["status"] != "need_more_info":
-        res = st.session_state.triage_result
-        if res.get("post_upgrade_applied"):
-            st.error("🚨 【加急优先处理】学生提交了人工复核/加急申请，请优先处理该工单")
-            st.write(f"升级原因：{res.get('upgrade_reason', '')}")
-        st.write(f"预约时间：{res['appointment_date']} {res['appointment_slot']}")
-        if res.get("appointment_note"):
-            st.write(f"学生备注：{res['appointment_note']}")
-
-        st.divider()
-        default_idx = ["P0","P1","P2"].index(res.get("urgency", "P1"))
-        adjust_urgency = st.radio("最终紧急度", options=["P0", "P1", "P2"],
-                                  index=default_idx, horizontal=True)
-        # 升级工单必须填写复核回复
-        upgrade_reply = ""
-        if res.get("post_upgrade_applied"):
-            upgrade_reply = st.text_area("升级复核回复（学生可查询到）", placeholder="例如：已核实情况，调整为P0加急，安排当日上门")
-        manual_chat_note = st.text_area("人工沟通记录", value=st.session_state.manual_chat_note)
-        st.session_state.manual_chat_note = manual_chat_note
-
-        workers, worker_error = st.session_state.worker_candidates
-        if worker_error == "no_available_worker":
-            st.error("无空闲人员，需手动调度")
-            selected_worker_name = st.text_input("指定维修人员")
-        else:
-            selected_worker_name = st.selectbox("选择派单人员",
-                                                options=[w["name"] for w in workers],
-                                                index=0)
-        confirm_note = st.text_area("派单备注", value="按预约时间上门")
-
-        if st.button("确认派单并归档", type="primary"):
-            if res.get("post_upgrade_applied") and not upgrade_reply.strip():
-                st.warning("请填写升级复核回复，学生可查询到处理结果")
+# ===================== 调度员工作台：口令登录，全量待办 =====================
+with tab_dispatch:
+    if not st.session_state.dispatch_logged_in:
+        st.subheader("调度员登录")
+        pwd = st.text_input("请输入调度口令", type="password")
+        if st.button("登录"):
+            if pwd == DISPATCHER_PASSWORD:
+                st.session_state.dispatch_logged_in = True
+                st.rerun()
             else:
-                worker_info = next(w for w in workers if w["name"] == selected_worker_name) if not worker_error else {"name": selected_worker_name, "phone": "人工录入"}
-                order_status = "加急工单已优先派单，等待上门" if res.get("post_upgrade_applied") else "已派单，等待上门"
-                order_data = {
-                    "work_order_id": res["pre_order_id"],
-                    "create_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "building": res.get("building"),
-                    "room": res.get("room"),
-                    "fault_type": res.get("fault_category_name"),
-                    "ai_urgency": res.get("urgency"),
-                    "final_urgency": adjust_urgency,
-                    "post_upgrade": res.get("post_upgrade_applied", False),
-                    "appointment_date": res.get("appointment_date"),
-                    "appointment_slot": res.get("appointment_slot"),
-                    "appointment_note": res.get("appointment_note", ""),
-                    "worker_name": worker_info["name"],
-                    "worker_phone": worker_info.get("phone", ""),
-                    "chat_record": manual_chat_note,
-                    "confirm_note": confirm_note,
-                    "upgrade_reason": res.get("upgrade_reason", ""),
-                    "upgrade_reply": upgrade_reply,
-                    "raw_report": report_text,
-                    "status": order_status
-                }
-            st.session_state.confirmed_order = order_data
-            ledger_path = os.path.join(DATA_DIR, "工单台账.json")
-            ledger = []
-            if os.path.exists(ledger_path):
-                with open(ledger_path, "r", encoding="utf-8") as f:
-                    ledger = json.load(f)
-            ledger.append(order_data)
-            with open(ledger_path, "w", encoding="utf-8") as f:
-                json.dump(ledger, f, ensure_ascii=False, indent=2)
-            csv_path = os.path.join(DATA_DIR, "工单台账.csv")
-            with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-                if ledger:
-                    writer = csv.DictWriter(f, fieldnames=ledger[0].keys())
-                    writer.writeheader()
-                    writer.writerows(ledger)
-            st.success("派单成功，学生可通过工单号查询到维修人员信息")
+                st.error("口令错误")
     else:
-        st.info("暂无可确认工单")
+        st.subheader("待确认工单队列")
+        pending = list_pending_orders()
+        if not pending:
+            st.info("暂无待确认工单")
+        for order in pending:
+            if order["post_upgrade"]:
+                st.error("🚨 加急复核工单")
+            else:
+                st.info("普通待确认工单")
+            st.write(f"工单号：{order['work_order_id']}")
+            st.write(f"位置：{order['building']} {order['room']}")
+            st.write(f"故障：{order['fault_type']}，AI建议等级：{order['ai_urgency']}")
+            st.write(f"预约：{order['appointment_date']} {order['appointment_slot']}")
+            if order["post_upgrade"]:
+                st.write(f"升级原因：{order['upgrade_reason']}")
+            with st.expander("处理派单"):
+                # 匹配维修人员
+                cat = next(c for c in FAULT_CATEGORIES if c["name"] == order["fault_type"])
+                skill = cat["skills"][0]
+                workers, w_err = query_available_workers(skill, order["final_urgency"] == "P0")
+                if w_err:
+                    w_name = st.text_input("手动指定人员", key=f"w_{order['work_order_id']}")
+                    w_phone = "人工录入"
+                else:
+                    w_name = st.selectbox("派单人员", [w["name"] for w in workers],
+                                          key=f"w_{order['work_order_id']}")
+                    w_info = next(w for w in workers if w["name"] == w_name)
+                    w_phone = w_info["phone"]
+                final_urg = st.radio("最终紧急度", ["P0", "P1", "P2"],
+                    index=["P0","P1","P2"].index(order["final_urgency"]),
+                    horizontal=True, key=f"urg_{order['work_order_id']}")
+                chat = st.text_area("沟通记录", key=f"chat_{order['work_order_id']}")
+                upg_reply = ""
+                if order["post_upgrade"]:
+                    upg_reply = st.text_area("复核回复（学生可见）", key=f"upg_{order['work_order_id']}")
+                note = st.text_area("派单备注", value="按预约时间上门", key=f"note_{order['work_order_id']}")
+                if st.button("确认派单", key=f"btn_{order['work_order_id']}"):
+                    if order["post_upgrade"] and not upg_reply.strip():
+                        st.warning("请填写复核回复")
+                    else:
+                        update_dispatch(order["work_order_id"], final_urg,
+                                        w_name, w_phone, chat, note, upg_reply)
+                        st.success("派单成功")
+                        st.rerun()
+        st.divider()
+        if st.button("退出登录"):
+            st.session_state.dispatch_logged_in = False
+            st.rerun()
 
 # ===================== 台账页 =====================
-with tab3:
-    st.subheader("历史工单台账")
-    ledger_path = os.path.join(DATA_DIR, "工单台账.json")
-    if os.path.exists(ledger_path):
-        with open(ledger_path, "r", encoding="utf-8") as f:
-            ledger = json.load(f)
-        st.dataframe(ledger, use_container_width=True)
-        with open(ledger_path, "rb") as f:
-            st.download_button("下载JSON台账", f, "工单台账.json")
-        csv_path = os.path.join(DATA_DIR, "工单台账.csv")
-        if os.path.exists(csv_path):
-            with open(csv_path, "rb") as f:
-                st.download_button("下载CSV台账", f, "工单台账.csv")
-    else:
-        st.info("暂无历史工单")
+with tab_ledger:
+    st.subheader("全部工单台账")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("一键重置为演示数据"):
+            reset_demo_data()
+            st.success("演示数据已重置")
+            st.rerun()
+    all_orders = list_orders_by_status()
+    st.dataframe(all_orders, use_container_width=True)
